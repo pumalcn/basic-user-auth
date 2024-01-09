@@ -1,4 +1,6 @@
-from django.shortcuts import get_object_or_404
+from django.contrib.auth.models import User
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.views import View
 from django.contrib.auth.forms import UserCreationForm
 from django.shortcuts import redirect, render
@@ -6,8 +8,9 @@ from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth import login, authenticate, logout
 from django.core.mail import send_mail
 from django.urls import reverse
-from api.models import EmailVerificationToken
 from .forms import UserRegistrationForm
+from .token_generator import account_activation_token
+from main.settings import EMAIL_HOST_USER
 
 
 class RegisterView(View):
@@ -70,12 +73,13 @@ def register_view(request):
             user.is_active = False
             user.save()
 
-            token = EmailVerificationToken.objects.create(user=user)
-            verification_url = request.build_absolute_uri(reverse('verify_email', args=[token.token]))
+            token = account_activation_token.make_token(user)
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            verification_url = request.build_absolute_uri(reverse('verify_email', args=[uid, token]))
             send_mail(
                 'Verify your email',
                 f'Please click on the link to verify your email: {verification_url}',
-                'pumalcn03@gmail.com',
+                EMAIL_HOST_USER,
                 [user.email],
                 fail_silently=False,
             )
@@ -97,6 +101,7 @@ def login_view(request):
                 return redirect('home')
     else:
         form = AuthenticationForm()
+
     return render(request, 'registration/login.html', {'form': form})
 
 
@@ -105,10 +110,15 @@ def logout_view(request):
     return redirect('login')
 
 
-def verify_email(request, token):
-    email_token = get_object_or_404(EmailVerificationToken, token=token)
-    user = email_token.user
-    user.is_active = True
-    user.save()
-    email_token.delete()
-    return render(request, 'registration/email_verified.html')
+def verify_email(request, uidb64, token):
+    try:
+        uid = force_str(urlsafe_base64_decode(uidb64))
+        user = User.objects.get(pk=uid)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        user = None
+        return redirect('register')
+
+    if user is not None and account_activation_token.check_token(user, token):
+        user.is_active = True
+        user.save()
+        return render(request, 'registration/email_verified.html')
